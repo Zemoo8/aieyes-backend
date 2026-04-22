@@ -1,13 +1,13 @@
 import base64
 import io
+import os
 import logging
 
-import easyocr
-import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from pydantic import BaseModel
+from groq import Groq
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("aieyes")
@@ -21,14 +21,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load once at startup — EasyOCR downloads models on first run (~500 MB)
-logger.info("Loading EasyOCR models (ar, fr)…")
-reader = easyocr.Reader(["ar", "en"], gpu=False)
-logger.info("EasyOCR ready.")
+client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 
 class OCRRequest(BaseModel):
-    image: str  # base64-encoded JPEG/PNG
+    image: str  # base64-encoded image
 
 
 @app.get("/health")
@@ -38,29 +35,41 @@ def health():
 
 @app.post("/ocr")
 def ocr(req: OCRRequest):
+    # Decode and re-encode as clean JPEG base64
     try:
         image_bytes = base64.b64decode(req.image)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid base64 image data")
+        pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        buffer = io.BytesIO()
+        pil_img.save(buffer, format="JPEG", quality=90)
+        jpeg_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image data: {e}")
 
     try:
-        pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        img_array = np.array(pil_img)
+        response = client.chat.completions.create(
+            model="llava-v1.5-7b-4096-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{jpeg_b64}",
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": "Read every piece of text visible in this image. Arabic and French. Return only the raw text, no explanation.",
+                        },
+                    ],
+                }
+            ],
+            max_tokens=1024,
+        )
+        text = response.choices[0].message.content or ""
+        logger.info("OCR success: %d chars returned", len(text))
+        return {"text": text, "confidence": 1.0}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Cannot decode image: {e}")
-
-    results = reader.readtext(img_array)
-
-    if not results:
-        return {"text": "", "confidence": 0.0}
-
-    # Merge all detected text blocks; weight confidence by text length
-    total_chars = sum(len(r[1]) for r in results)
-    if total_chars == 0:
-        return {"text": "", "confidence": 0.0}
-
-    merged_text = " ".join(r[1] for r in results)
-    avg_confidence = sum(r[2] * len(r[1]) for r in results) / total_chars
-
-    logger.info("OCR result: %d block(s), conf=%.2f", len(results), avg_confidence)
-    return {"text": merged_text, "confidence": round(avg_confidence, 4)}
+        logger.error("Groq API error: %s", e)
+        raise HTTPException(status_code=502, detail=f"Groq API error: {e}")

@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-easyocr
 pillow
 python-multipart
-numpy
+requests
+groq
