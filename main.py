@@ -23,6 +23,10 @@ app.add_middleware(
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
+# llava-v1.5-7b-4096-preview was retired by Groq (Oct 2024).
+# Override with the GROQ_VISION_MODEL env var if Groq changes models again.
+VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
+
 
 class OCRRequest(BaseModel):
     image: str  # base64-encoded image
@@ -47,7 +51,7 @@ def ocr(req: OCRRequest):
 
     try:
         response = client.chat.completions.create(
-            model="llava-v1.5-7b-4096-preview",
+            model=VISION_MODEL,
             messages=[
                 {
                     "role": "user",
@@ -66,6 +70,8 @@ def ocr(req: OCRRequest):
                 }
             ],
             max_tokens=1024,
+            # Qwen3 is a reasoning model; turn thinking off so only the text comes back
+            extra_body={"reasoning_effort": "none"},
         )
         text = response.choices[0].message.content or ""
         logger.info("OCR success: %d chars returned", len(text))
